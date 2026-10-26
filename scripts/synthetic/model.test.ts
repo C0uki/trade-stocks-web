@@ -150,3 +150,27 @@ describe("架空の先物", () => {
     expect(corr(returns(closes("GOLD")), returns(closes("SILV")))).toBeGreaterThan(0.5);
   });
 });
+
+describe("架空の決算", () => {
+  it("株だけにあり、発表日は昇順・上場1年後から。PER・PBR は現実的な範囲", () => {
+    expect(etfs.every((e) => !e.fundamentals?.length)).toBe(true);
+    const pers: number[] = [];
+    const pbrs: number[] = [];
+    for (const s of stocks) {
+      const f = s.fundamentals ?? [];
+      expect(f.length).toBeGreaterThan(0);
+      expect(f.map((r) => r.reportDate)).toEqual([...f.map((r) => r.reportDate)].sort());
+      expect(f[0].reportDate > s.bars[200].date).toBe(true);
+      for (const r of f) {
+        const close = s.bars.find((b) => b.date === r.reportDate)!.close;
+        if (r.epsTtm! > 0) pers.push(close / r.epsTtm!);
+        pbrs.push(close / r.bps!);
+      }
+    }
+    const median = (a: number[]) => [...a].sort((x, y) => x - y)[Math.floor(a.length / 2)];
+    expect(median(pers)).toBeGreaterThan(8);
+    expect(median(pers)).toBeLessThan(30);
+    expect(median(pbrs)).toBeGreaterThan(0.6);
+    expect(median(pbrs)).toBeLessThan(5);
+  });
+});

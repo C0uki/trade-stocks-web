@@ -44,15 +44,38 @@ if (!addMissing) {
   await writeFx("synthetic", "EUR", world.fx.EUR);
 }
 
+async function writeFundamentals(instrumentId: number, reports: NonNullable<(typeof world.instruments)[number]["fundamentals"]>) {
+  for (let i = 0; i < reports.length; i += 1000) {
+    await db
+      .insert(schema.fundamentals)
+      .values(reports.slice(i, i + 1000).map((r) => ({ instrumentId, ...r })))
+      .onConflictDoNothing();
+  }
+}
+
 let rows = 0;
 let added = 0;
+let withFundamentals = 0;
 for (const inst of world.instruments) {
   if (addMissing) {
     const [exists] = await db
       .select({ id: schema.instruments.id })
       .from(schema.instruments)
       .where(and(eq(schema.instruments.dataset, "synthetic"), eq(schema.instruments.providerSymbol, inst.providerSymbol)));
-    if (exists) continue;
+    if (exists) {
+      // あとから足した決算だけを入れる（すでにあれば何もしない）
+      if (inst.fundamentals?.length) {
+        const [{ n: has }] = await db
+          .select({ n: count() })
+          .from(schema.fundamentals)
+          .where(eq(schema.fundamentals.instrumentId, exists.id));
+        if (has === 0) {
+          await writeFundamentals(exists.id, inst.fundamentals);
+          withFundamentals++;
+        }
+      }
+      continue;
+    }
   }
   const row = await upsertInstrument({
     dataset: "synthetic",
@@ -66,9 +89,13 @@ for (const inst of world.instruments) {
   });
   await writeBars(row.id, inst.bars);
   await writeDividends(row.id, inst.dividends);
+  if (inst.fundamentals?.length) {
+    await writeFundamentals(row.id, inst.fundamentals);
+    withFundamentals++;
+  }
   await refreshDateRange(row.id);
   rows += inst.bars.length;
   added++;
 }
-console.log(`完了: ${added} 銘柄・${rows} 行`);
+console.log(`完了: ${added} 銘柄・${rows} 行・決算を入れた銘柄 ${withFundamentals}`);
 process.exit(0);

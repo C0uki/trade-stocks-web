@@ -15,6 +15,7 @@
     "db:migrate": "tsx scripts/migrate.ts",
     "import:universe": "tsx scripts/import/universe/build.ts",
     "import:data": "tsx scripts/import/run.ts",
+    "import:fundamentals": "tsx scripts/import/fundamentals/run.ts",
     "seed:dev": "tsx scripts/seed-dev.ts",
     "generate:synthetic": "tsx scripts/synthetic/generate.ts"
   },
@@ -42,6 +43,8 @@
     "drizzle-kit": "^0.31.11",
     "eslint": "^9",
     "eslint-config-next": "16.4.2",
+    "fflate": "^0.8.3",
+    "iconv-lite": "^0.7.3",
     "tailwindcss": "^4",
     "tsx": "^4.23.15",
     "typescript": "^5",
