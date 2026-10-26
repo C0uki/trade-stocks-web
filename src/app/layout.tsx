@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { auth, signOut } from "@/auth";
+import { CONTACT_URL } from "@/config/site";
 import { ja } from "@/lib/i18n/ja";
 import "./globals.css";
 
@@ -15,6 +16,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
       <body className="min-h-screen antialiased">
         <Header />
         <main className="mx-auto max-w-[1400px] px-4 py-5">{children}</main>
+        <Footer />
       </body>
     </html>
   );
@@ -65,5 +67,26 @@ async function Header() {
         </div>
       </div>
     </header>
+  );
+}
+
+function Footer() {
+  return (
+    <footer className="border-t border-line">
+      <nav className="mx-auto flex max-w-[1400px] flex-wrap gap-x-5 gap-y-2 px-4 py-4 text-xs text-muted">
+        <Link href="/rules" className="hover:text-fg">
+          {ja.nav.rules}
+        </Link>
+        <Link href="/terms" className="hover:text-fg">
+          {ja.footer.terms}
+        </Link>
+        <Link href="/privacy" className="hover:text-fg">
+          {ja.footer.privacy}
+        </Link>
+        <a href={CONTACT_URL} className="hover:text-fg" target="_blank" rel="noreferrer">
+          {ja.footer.contact}
+        </a>
+      </nav>
+    </footer>
   );
 }
