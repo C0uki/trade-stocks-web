@@ -87,3 +87,16 @@ export function marginRateFor(kind: AssetKind, sector: string | null): number {
   if (kind === "future") return FUTURE_MARGIN[futureSector(sector)];
   return kind === "crypto" ? MARGIN_TRADING_RATE.crypto : MARGIN_TRADING_RATE.stock;
 }
+
+/**
+ * シナリオに入れない期間（開始前のチャートを含めて重なったら、その銘柄を外す）。
+ * WTI原油の期近は 2020-04-20 にマイナス価格になり、指数化できない（その足は取り込んでいない）
+ */
+export const EXCLUDED_PERIODS: Record<string, { from: string; to: string }[]> = {
+  "CL=F": [{ from: "2020-03-15", to: "2020-06-15" }],
+};
+
+/** providerSymbol の銘柄が、期間 [from, to] のシナリオから外れるか */
+export function isExcludedPeriod(providerSymbol: string, from: string, to: string): boolean {
+  return (EXCLUDED_PERIODS[providerSymbol] ?? []).some((p) => p.from <= to && from <= p.to);
+}

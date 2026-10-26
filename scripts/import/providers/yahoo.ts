@@ -11,11 +11,12 @@ export class YahooProvider implements DataProvider {
   private yf = new YahooFinance({ suppressNotices: ["yahooSurvey"] });
 
   async fetchDaily(providerSymbol: string, from: IsoDate, to: IsoDate): Promise<DailyData> {
-    const r = await this.yf.chart(providerSymbol, {
-      period1: from,
-      period2: to,
-      interval: "1d",
-      events: "div|split",
+    const query = { period1: from, period2: to, interval: "1d", events: "div|split" } as const;
+    const fetch = () => this.yf.chart(providerSymbol, { ...query });
+    // 一部の指数（^STOXX50E など）は応答の形がライブラリの検証に通らないので、そのときだけ検証を切って取り直す
+    const r = await fetch().catch((e: Error) => {
+      if (e.name !== "FailedYahooValidationError") throw e;
+      return this.yf.chart(providerSymbol, { ...query }, { validateResult: false }) as ReturnType<typeof fetch>;
     });
     // タイムスタンプは取引所の現地時刻の始まりなので、オフセットを足して現地日付にする
     const offsetMs = (r.meta.gmtoffset ?? 0) * 1000;

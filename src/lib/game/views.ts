@@ -11,17 +11,25 @@ import { costRates, loadScenarioMarket, loadSeries, usesFixedFx, type ScenarioIn
 import { getScenarioRow, isInsider, isRevealed } from "./service";
 import { dateOfDay, fictionalYear, FIRST_DAY, scenarioCalendar } from "./timeline";
 
-const realFmt = (currency: string) =>
-  new Intl.NumberFormat("ja-JP", { style: "currency", currency, maximumFractionDigits: currency === "JPY" ? 0 : 2 });
+/** 円／ドル先物（1円 ≒ 0.007ドル）のような小さな値も桁を落とさずに出す */
+const realFmt = (currency: string, value: number) =>
+  new Intl.NumberFormat(
+    "ja-JP",
+    currency === "JPY"
+      ? { style: "currency", currency, maximumFractionDigits: 0 }
+      : value < 10
+        ? { style: "currency", currency, maximumSignificantDigits: 5 }
+        : { style: "currency", currency, maximumFractionDigits: 2 },
+  ).format(value);
 
 /**
  * 指数価格を実価格の表示文字列にする。外貨建て先物は、開始日の為替で固定して指数化しているので現地通貨で出す
  */
 function realPriceText(inst: ScenarioInstrument, indexPrice: number): string {
   if (usesFixedFx(inst) && inst.baseFx) {
-    return realFmt(inst.currency).format((indexPrice * inst.basePriceJpy) / INDEX_BASE / inst.baseFx);
+    return realFmt(inst.currency, (indexPrice * inst.basePriceJpy) / INDEX_BASE / inst.baseFx);
   }
-  return realFmt("JPY").format(indexToJpy(indexPrice, inst.basePriceJpy));
+  return realFmt("JPY", indexToJpy(indexPrice, inst.basePriceJpy));
 }
 
 /**
