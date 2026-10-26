@@ -53,3 +53,13 @@ describe("indicators", () => {
     expect(m.signal[32]).toBeNull();
   });
 });
+
+describe("シナリオから外す期間", () => {
+  it("期間が少しでも重なれば外し、重ならなければ外さない", async () => {
+    const { isExcludedPeriod } = await import("@/config/game");
+    expect(isExcludedPeriod("CL=F", "2019-04-01", "2020-04-01")).toBe(true);
+    expect(isExcludedPeriod("CL=F", "2020-06-10", "2021-06-10")).toBe(true);
+    expect(isExcludedPeriod("CL=F", "2020-06-16", "2021-06-16")).toBe(false);
+    expect(isExcludedPeriod("ES=F", "2019-04-01", "2020-04-01")).toBe(false);
+  });
+});

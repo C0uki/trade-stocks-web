@@ -14,6 +14,7 @@ import { addDays, toIso } from "../../src/lib/engine/calendar";
 import type { DataProvider } from "./provider";
 import { YahooProvider } from "./providers/yahoo";
 import { refreshDateRange, upsertInstrument, writeBars, writeDividends, writeFx } from "./writer";
+import { FUTURES } from "./universe/futures";
 import type { UniverseEntry } from "./universe/types";
 
 const { values: args } = parseArgs({
@@ -76,7 +77,12 @@ async function importInstrument(e: UniverseEntry) {
     console.warn(`  ${e.providerSymbol}: 通貨が ${data.currency}（想定 ${e.currency}）のためスキップ`);
     return 0;
   }
-  await writeBars(inst.id, data.bars);
+  // 原油の 2020-04-20 のようなマイナス価格の足は指数化できないので保存しない（その期間はシナリオからも外す）
+  // 高値・安値が始値・終値と矛盾する足（まれにある）は整える
+  const bars = data.bars
+    .filter((b) => b.low > 0)
+    .map((b) => ({ ...b, high: Math.max(b.open, b.high, b.low, b.close), low: Math.min(b.open, b.high, b.low, b.close) }));
+  await writeBars(inst.id, bars);
   await writeDividends(inst.id, data.dividends);
   if (data.splits.length) {
     await db
@@ -97,9 +103,10 @@ async function importInstrument(e: UniverseEntry) {
   return data.bars.length;
 }
 
-const universe: UniverseEntry[] = JSON.parse(
-  fs.readFileSync(path.join(import.meta.dirname, "universe", "universe.json"), "utf8"),
-);
+const universe: UniverseEntry[] = [
+  ...JSON.parse(fs.readFileSync(path.join(import.meta.dirname, "universe", "universe.json"), "utf8")),
+  ...FUTURES,
+];
 let targets = universe;
 if (args.symbols) {
   const want = new Set(args.symbols.split(","));

@@ -1,5 +1,5 @@
 import { expect, test, type Page, type Response } from "@playwright/test";
-import { login, uid } from "./helpers";
+import { becomeInsider, login, uid } from "./helpers";
 
 /** 架空データで、先物の新規売り→返済、追証→強制決済、信用買いを通す */
 
@@ -120,4 +120,36 @@ test("信用買いの注文と、反対向きの新規建ての拒否", async ({
   expect(view.margin.required).toBeGreaterThan(5_000_000);
   expect((await place({ side: "sell", account: "margin", action: "open", amount: 1_000_000 })).status()).toBe(400);
   expect((await place({ side: "sell", account: "margin", action: "close", fraction: 1 })).ok()).toBeTruthy();
+});
+
+test("実データの先物：S&P500先物を売買でき、マイナス価格の期間の原油はシナリオに入らない", async ({ page, browser }) => {
+  await login(page, uid("e2e-realfut"));
+  await becomeInsider(page, browser);
+  const create = async (startDate: string) => {
+    const r = await page.request.post("/api/scenarios", { data: { mode: "practice", dataset: "real", startDate } });
+    expect(r.ok()).toBeTruthy();
+    const { id } = await r.json();
+    const market: { id: number; symbol: string; kind: string }[] = await (
+      await page.request.get(`/api/scenarios/${id}/market`)
+    ).json();
+    return { id, futures: market.filter((m) => m.kind === "future") };
+  };
+  const covid = await create("2020-02-03");
+  expect(covid.futures.map((f) => f.symbol)).not.toContain("CL");
+  expect(covid.futures.map((f) => f.symbol)).toContain("ES");
+  expect((await create("2022-02-01")).futures.map((f) => f.symbol)).toContain("CL");
+
+  const es = covid.futures.find((f) => f.symbol === "ES")!;
+  const order = (data: Record<string, unknown>) =>
+    page.request.post(`/api/scenarios/${covid.id}/orders`, {
+      data: { instrumentId: es.id, account: "future", type: "market", ...data },
+    });
+  expect((await order({ side: "buy", action: "open", amount: 10_000_000 })).ok()).toBeTruthy();
+  await advance(page, covid.id);
+  let view = await getView(page, covid.id);
+  expect(view.leveraged).toHaveLength(1);
+  expect((await order({ side: "sell", action: "close", fraction: 1 })).ok()).toBeTruthy();
+  await advance(page, covid.id);
+  view = await getView(page, covid.id);
+  expect(view.leveraged).toHaveLength(0);
 });

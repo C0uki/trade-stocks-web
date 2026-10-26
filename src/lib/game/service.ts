@@ -3,6 +3,7 @@ import { and, asc, eq, gte, inArray, lte, max, min, sql } from "drizzle-orm";
 import {
   ABANDON_PENALTY_SCORE,
   INITIAL_CASH,
+  isExcludedPeriod,
   MARGIN_CARRY,
   marginRateFor,
   PRE_HISTORY_DAYS,
@@ -102,8 +103,12 @@ export async function createScenario(
   const last = cal[cal.length - 1];
 
   // 期間の最初から最後までデータがある銘柄だけを使う
-  const eligible = await db
-    .select({ id: schema.instruments.id, currency: schema.instruments.currency })
+  const candidates = await db
+    .select({
+      id: schema.instruments.id,
+      currency: schema.instruments.currency,
+      providerSymbol: schema.instruments.providerSymbol,
+    })
     .from(schema.instruments)
     .where(
       and(
@@ -112,6 +117,7 @@ export async function createScenario(
         gte(schema.instruments.lastDate, last),
       ),
     );
+  const eligible = candidates.filter((c) => !isExcludedPeriod(c.providerSymbol, first, last));
   if (eligible.length === 0) throw new GameError(503, "この期間に使える銘柄がありません");
 
   // 基準値＝開始日の円換算終値（開始日以前で最新の終値）
