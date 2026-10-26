@@ -26,6 +26,8 @@ export type SynthInstrument = {
   sector: string;
   bars: RawBar[];
   dividends: { exDate: IsoDate; amount: number }[];
+  /** 決算（株だけ）。発表日より前には見せない */
+  fundamentals?: { reportDate: IsoDate; epsTtm: number | null; bps: number | null }[];
 };
 
 export type SynthWorld = {
@@ -99,6 +101,8 @@ type Stock = {
   idioVar: number;
   idioTarget: number;
   earningsOffset: number;
+  /** 決算発表日（決算での窓開けと同じ日） */
+  earningsDates: IsoDate[];
   listedFrom: number;
   shares: number;
   yieldRate: number;
@@ -145,6 +149,7 @@ export function generateWorld(opts: WorldOptions): SynthWorld {
         idioVar: (idioVol * idioVol) / TD,
         idioTarget: (idioVol * idioVol) / TD,
         earningsOffset: rng.int(0, 62),
+        earningsDates: [],
         listedFrom,
         shares: Math.exp(rng.uniform(Math.log(1e8), Math.log(5e9))),
         yieldRate: rng.chance(0.15) ? 0 : rng.uniform(0.005, 0.045),
@@ -269,7 +274,10 @@ export function generateWorld(opts: WorldOptions): SynthWorld {
       const z = rng.normal();
       let r = s.alpha / TD + s.beta * regional[s.market] + s.sectorLoad * sectorFactor[s.info.sector];
       let idio = Math.sqrt(s.idioVar) * z;
-      if ((weekdayIndex + s.earningsOffset) % 63 === 0) idio += rng.normal() * 0.05;
+      if ((weekdayIndex + s.earningsOffset) % 63 === 0) {
+        idio += rng.normal() * 0.05;
+        s.earningsDates.push(date);
+      }
       if (rng.chance(0.0015)) idio += rng.normal() * 0.12;
       r += idio;
       s.idioVar = 0.05 * s.idioTarget + 0.08 * idio * idio + 0.87 * s.idioVar;
@@ -302,6 +310,9 @@ export function generateWorld(opts: WorldOptions): SynthWorld {
     path.push({ date, regime, global, etfReturn, open, usd: Math.exp(usd), eur: Math.exp(eur) });
   }
 
+  // 決算も別の乱数系列で作る（株価には影響しない）
+  addFundamentals(new Rng(opts.seed ^ 0x2545f491), stocks);
+
   return {
     instruments: [
       ...stocks.map((s) => s.inst),
@@ -311,6 +322,42 @@ export function generateWorld(opts: WorldOptions): SynthWorld {
     ],
     fx,
   };
+}
+
+/**
+ * 決算（EPS・BPS）を後から作る。未来の株価は使わず、発表日までの1年の平均株価を
+ * 会社ごとの「ふつうの PER・PBR」で割り、ゆっくり動くノイズを掛ける。
+ * なので PER・PBR は「最近の株価が利益に比べて高いか安いか」を表すが、それだけで将来は当たらない。
+ */
+function addFundamentals(rng: Rng, stocks: Stock[]) {
+  for (const s of stocks) {
+    const bars = s.inst.bars;
+    const normalPer = Math.exp(Math.log(s.market === "JP" ? 14 : 18) + rng.normal() * 0.35);
+    // 日本株は PBR が低めになりやすい
+    const normalPbr = Math.exp(Math.log(s.market === "JP" ? 1.2 : 2.5) + rng.normal() * 0.5);
+    let earningsNoise = rng.normal() * 0.2;
+    let bookNoise = rng.normal() * 0.1;
+    const reports: NonNullable<SynthInstrument["fundamentals"]> = [];
+    let i = 0;
+    for (const reportDate of s.earningsDates) {
+      while (i < bars.length && bars[i].date <= reportDate) i++;
+      // 上場から1年たつまでは決算を出さない（平均株価が取れないため）
+      if (i < TD) continue;
+      let sum = 0;
+      for (let k = i - TD; k < i; k++) sum += bars[k].close;
+      const avg = sum / TD;
+      earningsNoise = 0.8 * earningsNoise + rng.normal() * 0.15;
+      bookNoise = 0.95 * bookNoise + rng.normal() * 0.04;
+      // まれに赤字になる（PER は出さない）
+      const loss = rng.chance(0.03) ? -rng.uniform(0.2, 1) : 1;
+      reports.push({
+        reportDate,
+        epsTtm: (avg / normalPer) * Math.exp(earningsNoise) * loss,
+        bps: (avg / normalPbr) * Math.exp(bookNoise),
+      });
+    }
+    s.inst.fundamentals = reports;
+  }
 }
 
 type WorldDay = {
