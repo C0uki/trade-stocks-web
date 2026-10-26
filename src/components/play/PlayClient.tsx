@@ -51,7 +51,10 @@ export function PlayClient({ id, initial, initialMarket }: Props) {
     };
   }, [id, selected, view.currentDay]);
 
-  const held = useMemo(() => new Set(view.positions.map((p) => p.instrumentId)), [view.positions]);
+  const held = useMemo(
+    () => new Set([...view.positions.map((p) => p.instrumentId), ...view.leveraged.map((p) => p.instrumentId)]),
+    [view.positions, view.leveraged],
+  );
   const active = view.status === "active";
 
   async function act(fn: () => Promise<unknown>) {
@@ -74,7 +77,6 @@ export function PlayClient({ id, initial, initialMarket }: Props) {
     });
 
   const ret = view.equity / view.initialCash - 1;
-  const position = detail ? view.positions.find((p) => p.instrumentId === detail.id) : undefined;
 
   return (
     <div className="space-y-4">
@@ -97,7 +99,18 @@ export function PlayClient({ id, initial, initialMarket }: Props) {
         <Stat label={ja.play.equity} value={yen(view.equity)} testId="equity" />
         <Stat label={ja.play.returnRate} value={pct(ret)} className={tone(ret)} />
         <Stat label={ja.play.cash} value={yen(view.cash)} testId="cash" />
-        <Stat label={ja.play.taxPaid} value={yen(view.tax.paid)} />
+        <Stat label={ja.play.taxPaid} value={yen(view.tax.paid + view.futuresTax.paid)} />
+        {view.margin.level != null && (
+          <>
+            <Stat label={ja.play.requiredMargin} value={yen(view.margin.required)} testId="required-margin" />
+            <Stat
+              label={ja.play.marginLevel}
+              value={rate(view.margin.level, 0)}
+              className={view.margin.level < 1 ? "text-down" : ""}
+              testId="margin-level"
+            />
+          </>
+        )}
         <div className="ml-auto flex flex-wrap gap-2">
           {active ? (
             <>
@@ -128,6 +141,18 @@ export function PlayClient({ id, initial, initialMarket }: Props) {
           )}
         </div>
         {error && <p className="w-full text-sm text-down">{error}</p>}
+        {active && (view.margin.call || view.margin.forceClose) && (
+          <p
+            className="w-full rounded-md px-3 py-2 text-sm font-medium text-white"
+            style={{ background: "var(--down)" }}
+            role="alert"
+            data-testid="margin-call"
+          >
+            {view.margin.forceClose
+              ? ja.play.forceClose
+              : ja.play.marginCall(yen(view.margin.required), yen(view.cash))}
+          </p>
+        )}
       </section>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[300px_minmax(0,1fr)_300px]">
@@ -152,12 +177,21 @@ export function PlayClient({ id, initial, initialMarket }: Props) {
                 </span>
               </div>
               <dl className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-sm">
-                <Info label={ja.info.dividendYield} value={rate(detail.fundamentals.dividendYield)} />
-                <Info label={ja.info.per} value={ratio(detail.fundamentals.per)} />
-                <Info label={ja.info.pbr} value={ratio(detail.fundamentals.pbr, 2)} />
-                {detail.real && <Info label={ja.info.realPrice} value={yen(detail.real.closeJpy)} />}
+                {detail.kind !== "future" && (
+                  <>
+                    <Info label={ja.info.dividendYield} value={rate(detail.fundamentals.dividendYield)} />
+                    <Info label={ja.info.per} value={ratio(detail.fundamentals.per)} />
+                    <Info label={ja.info.pbr} value={ratio(detail.fundamentals.pbr, 2)} />
+                  </>
+                )}
+                {detail.marginRate < 1 && (
+                  <Info label={ja.info.marginRate} value={rate(detail.marginRate, 0)} />
+                )}
+                {detail.real && <Info label={ja.info.realPrice} value={detail.real.close} />}
               </dl>
-              <p className="mt-1 text-xs text-muted">{ja.play.chartHint}</p>
+              <p className="mt-1 text-xs text-muted">
+                {detail.kind === "future" && detail.currency !== "JPY" ? ja.play.chartHintFuture : ja.play.chartHint}
+              </p>
               <div className="mt-3">
                 <PriceChart bars={detail.bars} />
               </div>
@@ -174,8 +208,7 @@ export function PlayClient({ id, initial, initialMarket }: Props) {
               key={detail.id}
               scenarioId={id}
               instrument={detail}
-              position={position}
-              cash={view.cash}
+              view={view}
               disabled={!active || busy}
               onPlaced={refresh}
             />

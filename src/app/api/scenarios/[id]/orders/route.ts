@@ -5,6 +5,8 @@ import { placeOrder } from "@/lib/game/service";
 const Body = z.object({
   instrumentId: z.number().int(),
   side: z.enum(["buy", "sell"]),
+  account: z.enum(["cash", "margin", "future"]).optional(),
+  action: z.enum(["open", "close"]).nullish(),
   type: z.enum(["market", "limit"]),
   limitPrice: z.number().positive().nullish(),
   amount: z.number().positive().nullish(),

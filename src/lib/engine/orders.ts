@@ -1,13 +1,18 @@
 import type { AlignedBar } from "./calendar";
 import { buyPrice, sellPrice, type CostRates } from "./costs";
+import type { Account } from "./engine";
 
 export type Side = "buy" | "sell";
 export type OrderType = "market" | "limit";
 
 /**
  * 注文。数量は円の金額か保有割合で指定する。
+ * 現物（account 省略時）
  * - 買い: amount = 手数料込みで使う金額
  * - 売り: amount = 手取りの金額、または fraction = 保有の割合（0〜1）
+ * 信用・先物（side は売買の向き。新規売り＝sell・open、売り建玉の返済＝buy・close）
+ * - 新規: amount = 建玉の想定元本（円）
+ * - 返済: amount = 返済する想定元本、または fraction = 建玉の割合
  * 指値はスプレッド込みの実際の約定値に対する上限・下限。
  */
 export type Order = {
@@ -19,6 +24,8 @@ export type Order = {
   amount: number | null;
   fraction: number | null;
   placedDay: number;
+  account?: Account;
+  action?: "open" | "close";
 };
 
 /**

@@ -1,6 +1,14 @@
 import "server-only";
 import { and, asc, eq, gte, inArray, lte, max, min, sql } from "drizzle-orm";
-import { ABANDON_PENALTY_SCORE, INITIAL_CASH, PRE_HISTORY_DAYS, SCENARIO_DAYS, TAX_RATE } from "@/config/game";
+import {
+  ABANDON_PENALTY_SCORE,
+  INITIAL_CASH,
+  MARGIN_CARRY,
+  marginRateFor,
+  PRE_HISTORY_DAYS,
+  SCENARIO_DAYS,
+  TAX_RATE,
+} from "@/config/game";
 import { db, schema } from "@/lib/db";
 import type { Dataset } from "@/lib/db/schema";
 import { addDays, isWeekday, nextWeekday, parseIso, type IsoDate } from "@/lib/engine/calendar";
@@ -8,6 +16,7 @@ import {
   advanceDay,
   liquidationValue,
   markToMarket,
+  positionKey,
   type EngineContext,
   type LedgerEvent,
   type PortfolioState,
@@ -27,13 +36,19 @@ const RECENT_MARGIN_DAYS = 30;
 const LISTING_GRACE_DAYS = 7;
 
 export function engineContext(m: ScenarioMarket): EngineContext {
+  const get = (id: number) => {
+    const inst = m.instruments.get(id);
+    if (!inst) throw new Error(`unknown instrument ${id}`);
+    return inst;
+  };
   return {
     taxRate: TAX_RATE,
-    rates: (id) => {
-      const inst = m.instruments.get(id);
-      if (!inst) throw new Error(`unknown instrument ${id}`);
-      return costRates(inst);
+    rates: (id) => costRates(get(id)),
+    marginRate: (id) => {
+      const inst = get(id);
+      return marginRateFor(inst.kind, inst.sector);
     },
+    carry: MARGIN_CARRY,
   };
 }
 
@@ -115,7 +130,7 @@ export async function createScenario(
   const members = eligible.flatMap((e) => {
     const c = closeBy.get(e.id);
     const r = fx[e.currency][0];
-    return c && r ? [{ instrumentId: e.id, basePriceJpy: c * r }] : [];
+    return c && r ? [{ instrumentId: e.id, basePriceJpy: c * r, baseFx: r }] : [];
   });
 
   return db.transaction(async (tx) => {
@@ -190,8 +205,9 @@ export async function getScenarioRow(scenarioId: string, userId: string): Promis
 }
 
 async function loadState(tx: Tx, s: ScenarioRow): Promise<PortfolioState> {
-  const [pos, ords] = await Promise.all([
+  const [pos, lev, ords] = await Promise.all([
     tx.select().from(schema.positions).where(eq(schema.positions.scenarioId, s.id)),
+    tx.select().from(schema.leveragedPositions).where(eq(schema.leveragedPositions.scenarioId, s.id)),
     tx
       .select()
       .from(schema.orders)
@@ -201,7 +217,24 @@ async function loadState(tx: Tx, s: ScenarioRow): Promise<PortfolioState> {
   return {
     cash: s.cash,
     tax: { realized: s.taxRealized, paid: s.taxPaid },
+    futuresTax: { realized: s.futuresTaxRealized, paid: s.futuresTaxPaid },
+    marginCall: s.marginCall,
+    forceClose: s.forceClose,
     positions: Object.fromEntries(pos.map((p) => [p.instrumentId, { qty: p.qty, costBasis: p.costBasis }])),
+    leveraged: Object.fromEntries(
+      lev.map((p) => [
+        positionKey(p.account, p.instrumentId),
+        {
+          instrumentId: p.instrumentId,
+          account: p.account,
+          side: p.side,
+          qty: p.qty,
+          entryPrice: p.entryPrice,
+          mark: p.mark,
+          accrued: p.accrued,
+        },
+      ]),
+    ),
     orders: ords.map(
       (o): Order => ({
         id: o.id,
@@ -212,6 +245,8 @@ async function loadState(tx: Tx, s: ScenarioRow): Promise<PortfolioState> {
         amount: o.amount,
         fraction: o.fraction,
         placedDay: o.placedDay,
+        account: o.account,
+        action: o.action ?? undefined,
       }),
     ),
   };
@@ -226,9 +261,21 @@ async function saveState(tx: Tx, s: ScenarioRow, state: PortfolioState, day: num
     costBasis: p.costBasis,
   }));
   if (pos.length) await tx.insert(schema.positions).values(pos);
+  await tx.delete(schema.leveragedPositions).where(eq(schema.leveragedPositions.scenarioId, s.id));
+  const lev = Object.values(state.leveraged).map((p) => ({ scenarioId: s.id, ...p }));
+  if (lev.length) await tx.insert(schema.leveragedPositions).values(lev);
   await tx
     .update(schema.scenarios)
-    .set({ cash: state.cash, taxRealized: state.tax.realized, taxPaid: state.tax.paid, currentDay: day })
+    .set({
+      cash: state.cash,
+      taxRealized: state.tax.realized,
+      taxPaid: state.tax.paid,
+      futuresTaxRealized: state.futuresTax.realized,
+      futuresTaxPaid: state.futuresTax.paid,
+      marginCall: state.marginCall,
+      forceClose: state.forceClose,
+      currentDay: day,
+    })
     .where(eq(schema.scenarios.id, s.id));
 }
 
@@ -241,8 +288,12 @@ async function recordEvents(tx: Tx, scenarioId: string, day: number, events: Led
           scenarioId,
           day,
           kind: e.kind,
-          orderId: e.orderId,
+          // 強制決済・不足金の穴埋めには注文がない
+          orderId: UUID.test(e.orderId) ? e.orderId : null,
+          note: UUID.test(e.orderId) ? null : e.orderId,
           instrumentId: e.instrumentId,
+          account: e.account,
+          action: e.action,
           side: e.side,
           qty: e.qty,
           price: e.price,
@@ -253,13 +304,19 @@ async function recordEvents(tx: Tx, scenarioId: string, day: number, events: Led
       case "dividend":
         return { scenarioId, day, kind: e.kind, instrumentId: e.instrumentId, gross: e.gross, tax: e.tax };
       case "tax":
-        return { scenarioId, day, kind: e.kind, tax: e.amount };
+        return { scenarioId, day, kind: e.kind, tax: e.amount, note: e.bucket };
       case "cancel":
         return { scenarioId, day, kind: e.kind, orderId: e.orderId, note: e.reason };
+      case "interest":
+        return { scenarioId, day, kind: e.kind, instrumentId: e.instrumentId, gross: e.amount };
+      case "dividend_adj":
+        return { scenarioId, day, kind: e.kind, instrumentId: e.instrumentId, gross: e.amount };
+      case "margin_call":
+        return { scenarioId, day, kind: e.kind, gross: e.required, price: e.cash, note: e.level };
     }
   });
   await tx.insert(schema.ledger).values(rows);
-  const filled = events.flatMap((e) => (e.kind === "trade" && !e.orderId.startsWith("bench") ? [e.orderId] : []));
+  const filled = events.flatMap((e) => (e.kind === "trade" && UUID.test(e.orderId) ? [e.orderId] : []));
   const cancelled = events.flatMap((e) => (e.kind === "cancel" ? [e.orderId] : []));
   if (filled.length) {
     await tx
@@ -287,7 +344,11 @@ export async function advanceScenario(scenarioId: string, userId: string, steps:
     let state = await loadState(tx, s);
 
     // 必要なのは保有中と注文中の銘柄だけ
-    const ids = new Set<number>([...Object.keys(state.positions).map(Number), ...state.orders.map((o) => o.instrumentId)]);
+    const ids = new Set<number>([
+      ...Object.keys(state.positions).map(Number),
+      ...Object.values(state.leveraged).map((p) => p.instrumentId),
+      ...state.orders.map((o) => o.instrumentId),
+    ]);
     const fromDay = s.currentDay + 1;
     const series = await loadSeries(m, [...ids], fromDay, toDay);
     const days = toDayMarkets(series, toDay - fromDay + 1);
@@ -330,8 +391,15 @@ async function finishInTx(
     const days = toDayMarkets(series, end);
     const lastDay = days[end - 1];
     // 保有銘柄の終値は、その銘柄の最新の足（休場なら据え置き値）を使う
-    finalValue = liquidationValue(state, (id) => lastDay.get(id)?.bar.close, ctx);
-    bench = simulateBenchmark(allIds, days, INITIAL_CASH, ctx);
+    finalValue = liquidationValue(
+      state,
+      (id) => lastDay.get(id)?.bar.close,
+      ctx,
+      (id) => lastDay.get(id)?.fx ?? 1,
+    );
+    // ベンチマークは現物だけを均等に買い持ちする（先物は含めない）
+    const spotIds = allIds.filter((id) => m.instruments.get(id)?.kind !== "future");
+    bench = simulateBenchmark(spotIds, days, INITIAL_CASH, ctx);
   }
   const raw = excessReturnScore(finalValue, bench.finalValue, INITIAL_CASH);
   // ランク戦の放棄で得をしないよう、スコアは ABANDON_PENALTY_SCORE 以下にする（資産額は実際のまま残す）
@@ -370,6 +438,10 @@ export type PlaceOrderInput = {
   instrumentId: number;
   side: "buy" | "sell";
   type: "market" | "limit";
+  /** 省略時は現物。先物の銘柄は future、信用取引は margin */
+  account?: "cash" | "margin" | "future";
+  /** 信用・先物の新規か返済か */
+  action?: "open" | "close" | null;
   limitPrice?: number | null;
   amount?: number | null;
   fraction?: number | null;
@@ -380,25 +452,67 @@ export async function placeOrder(scenarioId: string, userId: string, o: PlaceOrd
     const s = await lockScenario(tx, scenarioId, userId);
     if (s.status !== "active") throw new GameError(409, "このシナリオは終了しています");
     const [member] = await tx
-      .select()
+      .select({ kind: schema.instruments.kind })
       .from(schema.scenarioInstruments)
+      .innerJoin(schema.instruments, eq(schema.instruments.id, schema.scenarioInstruments.instrumentId))
       .where(
         and(eq(schema.scenarioInstruments.scenarioId, s.id), eq(schema.scenarioInstruments.instrumentId, o.instrumentId)),
       );
     if (!member) throw new GameError(400, "このシナリオでは取引できない銘柄です");
+    const account = o.account ?? "cash";
+    if ((member.kind === "future") !== (account === "future")) {
+      throw new GameError(400, member.kind === "future" ? "先物は先物取引で注文してください" : "先物取引はできない銘柄です");
+    }
     if (o.type === "limit" && !(o.limitPrice && o.limitPrice > 0)) throw new GameError(400, "指値を入力してください");
-    if (o.side === "buy") {
-      if (!(o.amount && o.amount >= 1)) throw new GameError(400, "買付金額を入力してください");
-      if (o.fraction) throw new GameError(400, "買い注文は金額で指定してください");
+    const hasFraction = o.fraction != null && o.fraction > 0 && o.fraction <= 1;
+    const hasAmount = o.amount != null && o.amount >= 1;
+    // 現物は買い＝新規、売り＝返済
+    const action = account === "cash" ? (o.side === "buy" ? "open" : "close") : o.action;
+    if (!action) throw new GameError(400, "新規か返済かを選んでください");
+
+    if (action === "open") {
+      if (!hasAmount) throw new GameError(400, account === "cash" ? "買付金額を入力してください" : "建玉の金額を入力してください");
+      if (o.fraction) throw new GameError(400, "新規の注文は金額で指定してください");
+      if (account !== "cash") {
+        if (s.marginCall || s.forceClose) throw new GameError(409, "追証が出ている間は、信用・先物の新規建てはできません");
+        const [opposite] = await tx
+          .select({ side: schema.leveragedPositions.side })
+          .from(schema.leveragedPositions)
+          .where(
+            and(
+              eq(schema.leveragedPositions.scenarioId, s.id),
+              eq(schema.leveragedPositions.account, account),
+              eq(schema.leveragedPositions.instrumentId, o.instrumentId),
+            ),
+          );
+        if (opposite && opposite.side !== (o.side === "buy" ? "long" : "short")) {
+          throw new GameError(400, "反対向きの建玉があります。先に返済してください");
+        }
+      }
     } else {
-      const hasFraction = o.fraction != null && o.fraction > 0 && o.fraction <= 1;
-      const hasAmount = o.amount != null && o.amount >= 1;
-      if (hasFraction === hasAmount) throw new GameError(400, "売り注文は金額か保有割合のどちらかで指定してください");
-      const [pos] = await tx
-        .select()
-        .from(schema.positions)
-        .where(and(eq(schema.positions.scenarioId, s.id), eq(schema.positions.instrumentId, o.instrumentId)));
-      if (!pos) throw new GameError(400, "この銘柄は保有していません");
+      if (hasFraction === hasAmount) throw new GameError(400, "返済・売却は金額か割合のどちらかで指定してください");
+      if (account === "cash") {
+        const [pos] = await tx
+          .select()
+          .from(schema.positions)
+          .where(and(eq(schema.positions.scenarioId, s.id), eq(schema.positions.instrumentId, o.instrumentId)));
+        if (!pos) throw new GameError(400, "この銘柄は保有していません");
+      } else {
+        const [pos] = await tx
+          .select({ side: schema.leveragedPositions.side })
+          .from(schema.leveragedPositions)
+          .where(
+            and(
+              eq(schema.leveragedPositions.scenarioId, s.id),
+              eq(schema.leveragedPositions.account, account),
+              eq(schema.leveragedPositions.instrumentId, o.instrumentId),
+            ),
+          );
+        // 買い建玉の返済は売り、売り建玉の返済は買い
+        if (!pos || (pos.side === "long" ? "sell" : "buy") !== o.side) {
+          throw new GameError(400, "返済できる建玉がありません");
+        }
+      }
     }
     const [row] = await tx
       .insert(schema.orders)
@@ -406,10 +520,12 @@ export async function placeOrder(scenarioId: string, userId: string, o: PlaceOrd
         scenarioId: s.id,
         instrumentId: o.instrumentId,
         side: o.side,
+        account,
+        action: account === "cash" ? null : action,
         type: o.type,
         limitPrice: o.type === "limit" ? o.limitPrice! : null,
         amount: o.amount ?? null,
-        fraction: o.side === "sell" ? (o.fraction ?? null) : null,
+        fraction: action === "close" ? (o.fraction ?? null) : null,
         placedDay: s.currentDay,
       })
       .returning({ id: schema.orders.id });

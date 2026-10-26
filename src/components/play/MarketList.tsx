@@ -12,7 +12,7 @@ type Props = {
   onSelect: (id: number) => void;
 };
 
-const FILTERS = ["ALL", "HELD", "JP", "US", "EU", "CRYPTO"] as const;
+const FILTERS = ["ALL", "HELD", "JP", "US", "EU", "CRYPTO", "FUTURE"] as const;
 
 export function MarketList({ rows, held, selected, onSelect }: Props) {
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>("ALL");
@@ -21,7 +21,11 @@ export function MarketList({ rows, held, selected, onSelect }: Props) {
     const query = q.trim().toLowerCase();
     return rows.filter((r) => {
       if (filter === "HELD" && !held.has(r.id)) return false;
-      if (filter !== "ALL" && filter !== "HELD" && r.market !== filter) return false;
+      if (filter === "FUTURE" && r.kind !== "future") return false;
+      // 市場の絞り込みは現物だけ（先物は「先物」で見る）
+      if (filter !== "ALL" && filter !== "HELD" && filter !== "FUTURE" && (r.market !== filter || r.kind === "future")) {
+        return false;
+      }
       if (query && !r.name.toLowerCase().includes(query) && !r.symbol.toLowerCase().includes(query)) return false;
       return true;
     });
@@ -33,7 +37,7 @@ export function MarketList({ rows, held, selected, onSelect }: Props) {
       <div className="mt-2 flex flex-wrap gap-1">
         {FILTERS.map((f) => (
           <button key={f} className="tab" aria-pressed={filter === f} onClick={() => setFilter(f)}>
-            {f === "ALL" ? ja.play.all : f === "HELD" ? ja.play.holdingsOnly : ja.market[f]}
+            {f === "ALL" ? ja.play.all : f === "HELD" ? ja.play.holdingsOnly : f === "FUTURE" ? ja.play.futures : ja.market[f]}
           </button>
         ))}
       </div>
@@ -52,7 +56,7 @@ export function MarketList({ rows, held, selected, onSelect }: Props) {
                   {r.name}
                 </span>
                 <span className="text-xs text-muted">
-                  {r.symbol} · {ja.market[r.market]}
+                  {r.symbol} · {r.kind === "future" ? ja.kind.future : ja.market[r.market]}
                   {r.sector && r.sector !== ja.market[r.market] ? ` · ${r.sector}` : ""}
                   {!r.tradable && <span className="ml-1 text-down">{ja.play.closed}</span>}
                 </span>

@@ -206,8 +206,16 @@ export const scenarios = pgTable(
     currentDay: integer("current_day").notNull().default(0),
     status: text("status", { enum: ["active", "finished", "abandoned"] }).notNull().default("active"),
     cash: doublePrecision("cash").notNull(),
+    /** 株等（現物・信用）の譲渡損益の税 */
     taxRealized: doublePrecision("tax_realized").notNull().default(0),
     taxPaid: doublePrecision("tax_paid").notNull().default(0),
+    /** 先物の損益の税（株等とは通算しない） */
+    futuresTaxRealized: doublePrecision("futures_tax_realized").notNull().default(0),
+    futuresTaxPaid: doublePrecision("futures_tax_paid").notNull().default(0),
+    /** 追証が出ている（前日の終値で証拠金が足りなかった） */
+    marginCall: boolean("margin_call").notNull().default(false),
+    /** 次の営業日の始値で信用・先物をすべて強制決済する */
+    forceClose: boolean("force_close").notNull().default(false),
     finalValue: doublePrecision("final_value"),
     benchmarkValue: doublePrecision("benchmark_value"),
     score: doublePrecision("score"),
@@ -235,6 +243,8 @@ export const scenarioInstruments = pgTable(
       .notNull()
       .references(() => instruments.id),
     basePriceJpy: doublePrecision("base_price_jpy").notNull(),
+    /** 開始日の為替（1通貨単位あたり円）。外貨建て先物の損益の円換算に使う */
+    baseFx: doublePrecision("base_fx"),
   },
   (t) => [primaryKey({ columns: [t.scenarioId, t.instrumentId] })],
 );
@@ -252,6 +262,26 @@ export const positions = pgTable(
   (t) => [primaryKey({ columns: [t.scenarioId, t.instrumentId] })],
 );
 
+/** 信用・先物の建玉（1銘柄・1区分につき買いか売りのどちらか1つ） */
+export const leveragedPositions = pgTable(
+  "leveraged_positions",
+  {
+    scenarioId: uuid("scenario_id")
+      .notNull()
+      .references(() => scenarios.id, { onDelete: "cascade" }),
+    account: text("account", { enum: ["margin", "future"] }).notNull(),
+    instrumentId: integer("instrument_id").notNull(),
+    side: text("side", { enum: ["long", "short"] }).notNull(),
+    qty: doublePrecision("qty").notNull(),
+    entryPrice: doublePrecision("entry_price").notNull(),
+    /** 最後に値洗いした価格 */
+    mark: doublePrecision("mark").notNull(),
+    /** 建ててから現金に反映した損益の累計（返済時に譲渡損益として確定する） */
+    accrued: doublePrecision("accrued").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.scenarioId, t.account, t.instrumentId] })],
+);
+
 export const orders = pgTable(
   "orders",
   {
@@ -261,6 +291,9 @@ export const orders = pgTable(
       .references(() => scenarios.id, { onDelete: "cascade" }),
     instrumentId: integer("instrument_id").notNull(),
     side: text("side", { enum: ["buy", "sell"] }).notNull(),
+    account: text("account", { enum: ["cash", "margin", "future"] }).notNull().default("cash"),
+    /** 信用・先物の新規（open）か返済（close）か。現物は side で決まるので null */
+    action: text("action", { enum: ["open", "close"] }),
     type: text("type", { enum: ["market", "limit"] }).notNull(),
     limitPrice: doublePrecision("limit_price"),
     amount: doublePrecision("amount"),
@@ -273,7 +306,7 @@ export const orders = pgTable(
   (t) => [index("orders_scenario_idx").on(t.scenarioId, t.status)],
 );
 
-/** 約定・配当・税・取消の記録 */
+/** 約定・配当・税・取消・金利・追証の記録 */
 export const ledger = pgTable(
   "ledger",
   {
@@ -282,9 +315,13 @@ export const ledger = pgTable(
       .notNull()
       .references(() => scenarios.id, { onDelete: "cascade" }),
     day: integer("day").notNull(),
-    kind: text("kind", { enum: ["trade", "dividend", "tax", "cancel"] }).notNull(),
+    kind: text("kind", {
+      enum: ["trade", "dividend", "tax", "cancel", "interest", "dividend_adj", "margin_call"],
+    }).notNull(),
     orderId: uuid("order_id"),
     instrumentId: integer("instrument_id"),
+    account: text("account", { enum: ["cash", "margin", "future"] }),
+    action: text("action", { enum: ["open", "close"] }),
     side: text("side"),
     qty: doublePrecision("qty"),
     price: doublePrecision("price"),
