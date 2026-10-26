@@ -10,7 +10,11 @@ import type { Currency, Instrument } from "@/lib/engine/instruments";
 import { localAmountToIndex, toIndex, toJpy } from "@/lib/engine/pricing";
 import { calIndex } from "./timeline";
 
-export type ScenarioInstrument = Instrument & { basePriceJpy: number };
+/**
+ * baseFx は開始日の為替（1通貨単位あたり円）。外貨建て先物は、価格をこのレートで固定して指数化し
+ * （＝現地通貨の値動きだけを表す）、損益だけをその日の為替で円に換算する
+ */
+export type ScenarioInstrument = Instrument & { basePriceJpy: number; baseFx: number | null };
 
 export type ScenarioMarket = {
   dataset: Dataset;
@@ -32,6 +36,7 @@ export async function loadScenarioMarket(scenarioId: string, cal: IsoDate[], dat
       currency: schema.instruments.currency,
       sector: schema.instruments.sector,
       basePriceJpy: schema.scenarioInstruments.basePriceJpy,
+      baseFx: schema.scenarioInstruments.baseFx,
     })
     .from(schema.scenarioInstruments)
     .innerJoin(schema.instruments, eq(schema.instruments.id, schema.scenarioInstruments.instrumentId))
@@ -39,8 +44,8 @@ export async function loadScenarioMarket(scenarioId: string, cal: IsoDate[], dat
   return { dataset, cal, instruments: new Map(rows.map((r) => [r.id, r])) };
 }
 
-export function costRates(inst: Pick<Instrument, "kind" | "market" | "currency">): CostRates {
-  const c = costScheduleFor(inst.kind, inst.market);
+export function costRates(inst: Pick<Instrument, "kind" | "market" | "currency" | "sector">): CostRates {
+  const c = costScheduleFor(inst.kind, inst.market, inst.sector);
   return { commission: c.commission, spread: c.spread, fxFee: fxFeeFor(inst.kind, inst.currency) };
 }
 
@@ -73,7 +78,14 @@ export type IndexSeries = {
   dividends: number[];
   /** 現地通貨の終値（財務指標・実価格表示用） */
   localClose: (number | null)[];
+  /** 外貨建て先物の損益を円に直す倍率（その日の為替 ÷ 開始日の為替）。それ以外は 1 */
+  fx: number[];
 };
+
+/** 価格を開始日の為替で固定して指数化する銘柄（外貨建ての先物） */
+export function usesFixedFx(inst: Pick<ScenarioInstrument, "kind" | "currency">): boolean {
+  return inst.kind === "future" && inst.currency !== "JPY";
+}
 
 /** k=fromK..toK の指数系列を銘柄ごとに作る */
 export async function loadSeries(
@@ -123,11 +135,13 @@ export async function loadSeries(
     if (!inst) continue;
     const aligned = alignBars(rawBy.get(id) ?? [], dates);
     const rates = fx[inst.currency];
-    const series: IndexSeries = { bars: [], dividends: dates.map(() => 0), localClose: [] };
+    const series: IndexSeries = { bars: [], dividends: dates.map(() => 0), localClose: [], fx: [] };
+    const fixed = usesFixedFx(inst) && inst.baseFx ? inst.baseFx : null;
     aligned.forEach((bar, i) => {
       const r = rates[i];
       series.localClose.push(bar ? bar.close : null);
-      series.bars.push(bar && r ? toIndex(toJpy(bar, r), inst.basePriceJpy) : null);
+      series.bars.push(bar && r ? toIndex(toJpy(bar, fixed ?? r), inst.basePriceJpy) : null);
+      series.fx.push(fixed && r ? r / fixed : 1);
     });
     for (const d of divs) {
       if (d.instrumentId !== id) continue;
@@ -147,7 +161,7 @@ export function toDayMarkets(series: Map<number, IndexSeries>, length: number): 
   for (const [id, s] of series) {
     for (let i = 0; i < length; i++) {
       const bar = s.bars[i];
-      if (bar) days[i].set(id, { bar, dividend: s.dividends[i] });
+      if (bar) days[i].set(id, { bar, dividend: s.dividends[i], fx: s.fx[i] });
     }
   }
   return days;

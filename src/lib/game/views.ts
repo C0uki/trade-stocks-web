@@ -1,15 +1,28 @@
 import "server-only";
 import { and, asc, desc, eq, gt, lte } from "drizzle-orm";
-import { INITIAL_CASH, SCENARIO_DAYS, TAX_RATE } from "@/config/game";
+import { INITIAL_CASH, marginRateFor, SCENARIO_DAYS, TAX_RATE } from "@/config/game";
 import { db, schema } from "@/lib/db";
 import { addDays } from "@/lib/engine/calendar";
-import { markToMarket } from "@/lib/engine/engine";
+import { EMERGENCY_MARGIN_LEVEL } from "@/lib/engine/engine";
 import { trailingDividendYield, valuationRatios } from "@/lib/engine/fundamentals";
-import { indexToJpy } from "@/lib/engine/pricing";
+import { INDEX_BASE, indexToJpy } from "@/lib/engine/pricing";
 import { GameError } from "./errors";
-import { costRates, loadScenarioMarket, loadSeries } from "./market";
+import { costRates, loadScenarioMarket, loadSeries, usesFixedFx, type ScenarioInstrument } from "./market";
 import { getScenarioRow, isInsider, isRevealed } from "./service";
 import { dateOfDay, fictionalYear, FIRST_DAY, scenarioCalendar } from "./timeline";
+
+const realFmt = (currency: string) =>
+  new Intl.NumberFormat("ja-JP", { style: "currency", currency, maximumFractionDigits: currency === "JPY" ? 0 : 2 });
+
+/**
+ * 指数価格を実価格の表示文字列にする。外貨建て先物は、開始日の為替で固定して指数化しているので現地通貨で出す
+ */
+function realPriceText(inst: ScenarioInstrument, indexPrice: number): string {
+  if (usesFixedFx(inst) && inst.baseFx) {
+    return realFmt(inst.currency).format((indexPrice * inst.basePriceJpy) / INDEX_BASE / inst.baseFx);
+  }
+  return realFmt("JPY").format(indexToJpy(indexPrice, inst.basePriceJpy));
+}
 
 /**
  * クライアントに返すデータはここで組み立てる。
@@ -21,8 +34,9 @@ export async function scenarioView(scenarioId: string, userId: string) {
   const revealed = isRevealed(s);
   const cal = scenarioCalendar(s.startDate);
   const m = await loadScenarioMarket(s.id, cal, s.dataset);
-  const [pos, openOrders, recent, equity] = await Promise.all([
+  const [pos, lev, openOrders, recent, equity] = await Promise.all([
     db.select().from(schema.positions).where(eq(schema.positions.scenarioId, s.id)),
+    db.select().from(schema.leveragedPositions).where(eq(schema.leveragedPositions.scenarioId, s.id)),
     db
       .select()
       .from(schema.orders)
@@ -42,23 +56,41 @@ export async function scenarioView(scenarioId: string, userId: string) {
   ]);
   const series = await loadSeries(
     m,
-    pos.map((p) => p.instrumentId),
+    [...pos.map((p) => p.instrumentId), ...lev.map((p) => p.instrumentId)],
     s.currentDay,
     s.currentDay,
   );
   const close = (id: number) => series.get(id)?.bars[0]?.close;
-  const state = {
-    cash: s.cash,
-    tax: { realized: s.taxRealized, paid: s.taxPaid },
-    positions: Object.fromEntries(pos.map((p) => [p.instrumentId, p])),
-    orders: [],
-  };
+  const fxOf = (id: number) => series.get(id)?.fx[0] ?? 1;
+  const leveraged = lev.map((p) => {
+    const inst = m.instruments.get(p.instrumentId);
+    const price = p.mark;
+    const value = p.qty * price * fxOf(p.instrumentId);
+    return {
+      account: p.account,
+      instrumentId: p.instrumentId,
+      symbol: inst?.symbol ?? "",
+      name: inst?.name ?? "",
+      side: p.side,
+      qty: p.qty,
+      entryPrice: p.entryPrice,
+      price,
+      value,
+      /** 建ててからの損益（手数料・配当の調整を含む） */
+      pnl: p.accrued,
+      margin: inst ? value * marginRateFor(inst.kind, inst.sector) : 0,
+      realPrice: revealed && inst ? realPriceText(inst, price) : null,
+    };
+  });
+  const requiredMargin = leveraged.reduce((a, p) => a + p.margin, 0);
+  // 信用・先物の損益は値洗いで現金に入っているので、時価評価は現金と現物だけでよい
+  const equityNow = s.cash + pos.reduce((a, p) => a + p.qty * (close(p.instrumentId) ?? 0), 0);
   const name = (id: number | null) => (id ? (m.instruments.get(id)?.name ?? "") : "");
   const symbol = (id: number | null) => (id ? (m.instruments.get(id)?.symbol ?? "") : "");
   const realPrice = (id: number | null, indexPrice: number | null) => {
     if (!revealed || !id || indexPrice == null) return null;
     const inst = m.instruments.get(id);
-    return inst ? indexToJpy(indexPrice, inst.basePriceJpy) : null;
+    return inst ? realPriceText(inst, indexPrice) : null;
   };
 
   return {
@@ -74,9 +106,21 @@ export async function scenarioView(scenarioId: string, userId: string) {
     currentDate: revealed ? dateOfDay(cal, s.currentDay) : null,
     initialCash: INITIAL_CASH,
     cash: s.cash,
-    equity: markToMarket(state, close),
+    equity: equityNow,
     taxRate: TAX_RATE,
     tax: { realized: s.taxRealized, paid: s.taxPaid },
+    futuresTax: { realized: s.futuresTaxRealized, paid: s.futuresTaxPaid },
+    margin: {
+      required: requiredMargin,
+      /** 現物の買い付けや新規建てに使える現金 */
+      free: s.cash - requiredMargin,
+      /** 維持率（現金 ÷ 必要証拠金）。建玉がなければ null */
+      level: requiredMargin > 0 ? s.cash / requiredMargin : null,
+      emergencyLevel: EMERGENCY_MARGIN_LEVEL,
+      call: s.marginCall,
+      forceClose: s.forceClose,
+    },
+    leveraged,
     result:
       s.status === "active"
         ? null
@@ -102,6 +146,8 @@ export async function scenarioView(scenarioId: string, userId: string) {
       symbol: symbol(o.instrumentId),
       name: name(o.instrumentId),
       side: o.side,
+      account: o.account,
+      action: o.action,
       type: o.type,
       limitPrice: o.limitPrice,
       amount: o.amount,
@@ -113,6 +159,8 @@ export async function scenarioView(scenarioId: string, userId: string) {
       day: l.day,
       date: revealed ? dateOfDay(cal, l.day) : null,
       kind: l.kind,
+      account: l.account,
+      action: l.action,
       instrumentId: l.instrumentId,
       symbol: symbol(l.instrumentId),
       name: name(l.instrumentId),
@@ -155,7 +203,7 @@ export async function marketView(scenarioId: string, userId: string) {
         price: today?.close ?? null,
         change: today && prev ? today.close / prev.close - 1 : null,
         tradable: today?.tradable ?? false,
-        realPrice: revealed && today ? indexToJpy(today.close, inst.basePriceJpy) : null,
+        realPrice: revealed && today ? realPriceText(inst, today.close) : null,
       };
     })
     .sort((a, b) => MARKET_ORDER.indexOf(a.market) - MARKET_ORDER.indexOf(b.market) || a.symbol.localeCompare(b.symbol));
@@ -219,6 +267,7 @@ export async function instrumentView(scenarioId: string, userId: string, instrum
     currency: inst.currency,
     sector: inst.sector,
     costs: rates,
+    marginRate: marginRateFor(inst.kind, inst.sector),
     tradableToday: last?.tradable ?? false,
     bars,
     fundamentals: {
@@ -226,7 +275,7 @@ export async function instrumentView(scenarioId: string, userId: string, instrum
       per: ratios.per,
       pbr: ratios.pbr,
     },
-    real: revealed && last ? { basePriceJpy: inst.basePriceJpy, closeJpy: indexToJpy(last.close, inst.basePriceJpy) } : null,
+    real: revealed && last ? { close: realPriceText(inst, last.close) } : null,
   };
 }
 

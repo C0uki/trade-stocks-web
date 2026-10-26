@@ -42,7 +42,8 @@ export const COSTS: Record<"JP" | "US" | "EU" | "CRYPTO", CostSchedule> = {
 /** 外貨建ての資産を売買するときの為替手数料（片道） */
 export const FX_FEE = 0.0025;
 
-export function costScheduleFor(kind: AssetKind, market: string): CostSchedule {
+export function costScheduleFor(kind: AssetKind, market: string, sector: string | null = null): CostSchedule {
+  if (kind === "future") return futureCostSchedule(sector);
   if (kind === "crypto") return COSTS.CRYPTO;
   if (market === "JP" || market === "US" || market === "EU") return COSTS[market];
   return COSTS.US;
@@ -50,6 +51,39 @@ export function costScheduleFor(kind: AssetKind, market: string): CostSchedule {
 
 /** 暗号資産は国内取引所の円建て取引を想定し、為替手数料はかけない */
 export function fxFeeFor(kind: AssetKind, currency: Currency): number {
-  if (kind === "crypto" || currency === "JPY") return 0;
+  if (kind === "crypto" || kind === "future" || currency === "JPY") return 0;
   return FX_FEE;
+}
+
+/* ───────────── 信用取引・先物 ───────────── */
+
+/** 先物の分類。instruments.sector にこの名前を入れる */
+export const FUTURE_SECTORS = ["株価指数", "商品", "債券", "為替"] as const;
+export type FutureSector = (typeof FUTURE_SECTORS)[number];
+
+/** 先物の取引コスト（想定元本に対する率）。為替手数料はかけず、損益だけをその日のレートで円に換算する */
+export const FUTURE_COSTS: Record<FutureSector, CostSchedule> = {
+  株価指数: { commission: 0.00005, spread: 0.0001 },
+  商品: { commission: 0.00005, spread: 0.0003 },
+  債券: { commission: 0.00005, spread: 0.0001 },
+  為替: { commission: 0.00005, spread: 0.0001 },
+};
+
+/** 必要証拠金の率（建玉の時価に対する割合） */
+export const FUTURE_MARGIN: Record<FutureSector, number> = { 株価指数: 0.1, 商品: 0.1, 債券: 0.05, 為替: 0.05 };
+export const MARGIN_TRADING_RATE = { stock: 0.3, crypto: 0.5 } as const;
+
+/** 信用取引の年率コスト：買い方金利と貸株料 */
+export const MARGIN_CARRY = { long: 0.028, short: 0.011 } as const;
+
+const futureSector = (sector: string | null): FutureSector =>
+  (FUTURE_SECTORS as readonly string[]).includes(sector ?? "") ? (sector as FutureSector) : "株価指数";
+
+export function futureCostSchedule(sector: string | null): CostSchedule {
+  return FUTURE_COSTS[futureSector(sector)];
+}
+
+export function marginRateFor(kind: AssetKind, sector: string | null): number {
+  if (kind === "future") return FUTURE_MARGIN[futureSector(sector)];
+  return kind === "crypto" ? MARGIN_TRADING_RATE.crypto : MARGIN_TRADING_RATE.stock;
 }

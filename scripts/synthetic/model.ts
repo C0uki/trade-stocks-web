@@ -8,6 +8,8 @@
  * - 暗号資産は毎日動き、独自のブーム・バスト局面を持ち、歴史の途中から上場する
  * - ETF は各地域の構成銘柄の時価総額加重指数
  * - 為替は平均回帰する対数ランダムウォークで、リスクオフ時に円高になる
+ * - 先物（株価指数・商品・債券・為替）は、上の世界の値動き（局面・世界因子・ETF・為替）から作る。
+ *   乱数は別系列なので、先物を足しても株・暗号資産・為替の相場は変わらない
  */
 import { addDays, isWeekday, type IsoDate, type RawBar } from "../../src/lib/engine/calendar";
 import type { AssetKind, Currency, Market } from "../../src/lib/engine/instruments";
@@ -205,6 +207,9 @@ export function generateWorld(opts: WorldOptions): SynthWorld {
   const usdMean = usd;
   const eurMean = eur;
 
+  /** 先物を作るために、平日ごとの世界の状態を記録しておく */
+  const path: WorldDay[] = [];
+
   let regime: Regime = "calm";
   let cryptoRegime: CryptoRegime = "chop";
   let weekdayIndex = -1;
@@ -285,18 +290,139 @@ export function generateWorld(opts: WorldOptions): SynthWorld {
       capAfter[s.market] += s.price * s.shares;
     }
 
+    const etfReturn = { JP: 0, US: 0, EU: 0 };
     for (const e of etfs) {
       if (!open[e.market] || capBefore[e.market] === 0) continue;
       const prev = e.level;
       const r = Math.log(capAfter[e.market] / capBefore[e.market]);
+      etfReturn[e.market] = r;
       e.level = prev * Math.exp(r);
       e.inst.bars.push(makeBar(rng, date, prev, r, 0.012, 5e6));
     }
+    path.push({ date, regime, global, etfReturn, open, usd: Math.exp(usd), eur: Math.exp(eur) });
   }
 
   return {
-    instruments: [...stocks.map((s) => s.inst), ...etfs.map((e) => e.inst), ...cryptos.map((c) => c.inst)],
+    instruments: [
+      ...stocks.map((s) => s.inst),
+      ...etfs.map((e) => e.inst),
+      ...cryptos.map((c) => c.inst),
+      ...generateFutures(new Rng(opts.seed ^ 0x5f3759df), path),
+    ],
     fx,
   };
+}
+
+type WorldDay = {
+  date: IsoDate;
+  regime: Regime;
+  global: number;
+  /** 各地域の ETF の対数リターン（休場なら 0） */
+  etfReturn: Record<"JP" | "US" | "EU", number>;
+  open: Record<"JP" | "US" | "EU", boolean>;
+  usd: number;
+  eur: number;
+};
+
+type FutureSpec = {
+  symbol: string;
+  name: string;
+  sector: "株価指数" | "商品" | "債券" | "為替";
+  market: "JP" | "US" | "EU";
+  currency: Currency;
+  price: number;
+  /** その日の対数リターン（休場の日は呼ばない） */
+  step: (d: WorldDay, i: number) => number;
+};
+
+/** 先物13銘柄。満期のない「つなぎ足」として、1本の連続した価格を作る */
+function generateFutures(rng: Rng, path: WorldDay[]): SynthInstrument[] {
+  const sq = Math.sqrt(TD);
+  const crisis = (d: WorldDay) => (d.regime === "crisis" ? 1 : d.regime === "bear" ? 0.5 : 0);
+  // 金利は平均回帰し、リスクオフ（世界因子の下落）で下がる＝債券先物は上がる
+  let y10 = rng.uniform(0.02, 0.05);
+  let y30 = y10 + rng.uniform(0.003, 0.012);
+  const y10Mean = y10;
+  const spread30 = y30 - y10;
+  const bondYields: { y10: number; y30: number; d10: number; d30: number }[] = [];
+  for (const d of path) {
+    const shock = rng.normal() * (0.008 / sq);
+    const d10 = 0.004 * (y10Mean - y10) + shock + 0.02 * d.global;
+    const d30 = d10 * 0.85 + 0.01 * (y10 + spread30 - y30) + rng.normal() * (0.003 / sq);
+    y10 = Math.max(0.001, y10 + d10);
+    y30 = Math.max(0.002, y30 + d30);
+    bondYields.push({ y10, y30, d10, d30 });
+  }
+  // 商品はそれぞれ独自の値動き＋世界因子への連動＋まれなジャンプ
+  const commodity = (vol: number, beta: number, haven: number, jump: number, mean: number) => (d: WorldDay) => {
+    let r = beta * d.global + haven * crisis(d) * (0.01 / sq) + rng.normal() * (vol / sq) + mean / TD;
+    if (rng.chance(jump)) r += rng.normal() * vol * 0.4;
+    return r;
+  };
+  const gold = commodity(0.15, -0.1, 3, 0.002, 0.02);
+  let goldR = 0;
+  const specs: FutureSpec[] = [
+    { symbol: "JPIF", name: "架空日本株指数先物", sector: "株価指数", market: "JP", currency: "JPY", price: rng.uniform(9000, 30000),
+      step: (d) => d.etfReturn.JP + rng.normal() * (0.01 / sq) },
+    { symbol: "USIF", name: "架空米国株指数先物", sector: "株価指数", market: "US", currency: "USD", price: rng.uniform(1000, 4000),
+      step: (d) => d.etfReturn.US + rng.normal() * (0.01 / sq) },
+    { symbol: "USTF", name: "架空米国ハイテク株指数先物", sector: "株価指数", market: "US", currency: "USD", price: rng.uniform(2000, 12000),
+      step: (d) => 1.25 * d.etfReturn.US + rng.normal() * (0.1 / sq) },
+    { symbol: "EUIF", name: "架空欧州株指数先物", sector: "株価指数", market: "EU", currency: "EUR", price: rng.uniform(2500, 4500),
+      step: (d) => d.etfReturn.EU + rng.normal() * (0.01 / sq) },
+    { symbol: "GOLD", name: "架空金先物", sector: "商品", market: "US", currency: "USD", price: rng.uniform(300, 1500),
+      step: (d) => (goldR = gold(d)) },
+    { symbol: "SILV", name: "架空銀先物", sector: "商品", market: "US", currency: "USD", price: rng.uniform(5, 25),
+      step: (d) => 1.1 * goldR + 0.1 * d.global + rng.normal() * (0.18 / sq) },
+    { symbol: "OIL", name: "架空原油先物", sector: "商品", market: "US", currency: "USD", price: rng.uniform(25, 90),
+      step: commodity(0.33, 0.6, -2, 0.004, -0.02) },
+    { symbol: "NGAS", name: "架空天然ガス先物", sector: "商品", market: "US", currency: "USD", price: rng.uniform(2, 8),
+      step: commodity(0.5, 0.4, 0, 0.008, -0.02) },
+    { symbol: "COPR", name: "架空銅先物", sector: "商品", market: "US", currency: "USD", price: rng.uniform(1, 4),
+      step: commodity(0.22, 0.6, -1, 0.002, -0.01) },
+    { symbol: "UST10", name: "架空米国債10年先物", sector: "債券", market: "US", currency: "USD", price: rng.uniform(105, 130),
+      // 価格の変化 ≒ −デュレーション × 金利の変化（＋わずかなキャリー）
+      step: (_d, i) => -7.5 * bondYields[i].d10 + (bondYields[i].y10 - 0.02) / TD },
+    { symbol: "UST30", name: "架空米国債30年先物", sector: "債券", market: "US", currency: "USD", price: rng.uniform(110, 160),
+      step: (_d, i) => -17 * bondYields[i].d30 + (bondYields[i].y30 - 0.02) / TD },
+    { symbol: "EURUSD", name: "架空ユーロ／ドル先物", sector: "為替", market: "US", currency: "USD", price: 1,
+      step: (d, i) => (i === 0 ? 0 : Math.log(d.eur / d.usd / (path[i - 1].eur / path[i - 1].usd))) },
+    { symbol: "JPYUSD", name: "架空円／ドル先物", sector: "為替", market: "US", currency: "USD", price: 1,
+      // 1円あたりのドル（×100）。円高で上がる
+      step: (d, i) => (i === 0 ? 0 : Math.log(path[i - 1].usd / d.usd)) },
+  ];
+  // 為替先物の初値は、その日の架空為替から決める
+  specs[11].price = path[0].eur / path[0].usd;
+  specs[12].price = 100 / path[0].usd;
+
+  const out = specs.map(
+    (f): SynthInstrument => ({
+      providerSymbol: `SYN-FUT-${f.symbol}`,
+      symbol: f.symbol,
+      name: f.name,
+      kind: "future",
+      market: f.market,
+      currency: f.currency,
+      sector: f.sector,
+      bars: [],
+      dividends: [],
+    }),
+  );
+  // 休場の日の値動きは、次に取引できる日にまとめて反映する
+  const pending = specs.map(() => 0);
+  path.forEach((d, i) => {
+    specs.forEach((f, j) => {
+      // 指数先物はその地域の休場日に休む。商品・債券・為替は米国の休場日に休む
+      pending[j] += f.step(d, i);
+      if (!d.open[f.market]) return;
+      const r = pending[j];
+      pending[j] = 0;
+      const prev = f.price;
+      f.price = prev * Math.exp(r);
+      const vol = f.sector === "債券" || f.sector === "為替" ? 0.004 : f.sector === "商品" ? 0.02 : 0.012;
+      out[j].bars.push(makeBar(rng, d.date, prev, r, vol, 1e5));
+    });
+  });
+  return out;
 }
 

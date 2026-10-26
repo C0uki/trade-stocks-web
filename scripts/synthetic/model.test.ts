@@ -106,3 +106,47 @@ describe("架空データの生成モデル", () => {
     }
   });
 });
+
+describe("架空の先物", () => {
+  const futures = world.instruments.filter((i) => i.kind === "future");
+  const closes = (symbol: string) => futures.find((f) => f.symbol === symbol)!.bars.map((b) => b.close);
+  const returns = (c: number[]) => c.slice(1).map((v, i) => Math.log(v / c[i]));
+  const corr = (a: number[], b: number[]) => {
+    const n = Math.min(a.length, b.length);
+    const ma = a.slice(0, n).reduce((x, y) => x + y, 0) / n;
+    const mb = b.slice(0, n).reduce((x, y) => x + y, 0) / n;
+    let num = 0;
+    let da = 0;
+    let db = 0;
+    for (let i = 0; i < n; i++) {
+      num += (a[i] - ma) * (b[i] - mb);
+      da += (a[i] - ma) ** 2;
+      db += (b[i] - mb) ** 2;
+    }
+    return num / Math.sqrt(da * db);
+  };
+
+  it("13銘柄あり、分類が付いている", () => {
+    expect(futures).toHaveLength(13);
+    expect(new Set(futures.map((f) => f.sector))).toEqual(new Set(["株価指数", "商品", "債券", "為替"]));
+  });
+
+  it("先物を足しても、株・暗号資産・為替の相場は変わらない（乱数が別系列）", () => {
+    const again = generateWorld({ seed: 42, start: "2001-01-01", years: 12 });
+    expect(again.instruments.filter((i) => i.kind !== "future")).toEqual(world.instruments.filter((i) => i.kind !== "future"));
+  });
+
+  it("値動きの大きさが資産ごとに現実的な範囲に収まる", () => {
+    const vol = (s: string) => annualVol(closes(s), 252);
+    expect(vol("UST10")).toBeLessThan(0.15);
+    expect(vol("EURUSD")).toBeLessThan(0.2);
+    expect(vol("NGAS")).toBeGreaterThan(vol("GOLD"));
+    for (const f of futures) expect(vol(f.symbol)).toBeLessThan(0.9);
+  });
+
+  it("指数先物は同じ地域の ETF と強く連動し、金と銀も連動する", () => {
+    const etf = world.instruments.find((i) => i.providerSymbol === "SYN-US-ETF")!.bars.map((b) => b.close);
+    expect(corr(returns(closes("USIF")), returns(etf))).toBeGreaterThan(0.8);
+    expect(corr(returns(closes("GOLD")), returns(closes("SILV")))).toBeGreaterThan(0.5);
+  });
+});

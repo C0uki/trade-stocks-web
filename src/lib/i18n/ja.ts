@@ -1,4 +1,7 @@
 /** 画面の文言。英語対応するときはこのファイルと同じ形の en.ts を足して切り替える */
+
+/** 0.005% のような小さな率も桁を落とさずに出す */
+const pctText = (r: number) => `${Number((r * 100).toPrecision(2))}%`;
 export const ja = {
   app: {
     name: "ヒストリカル・トレード",
@@ -56,10 +59,17 @@ export const ja = {
     cash: "現金",
     returnRate: "収益率",
     taxPaid: "納税済み",
+    requiredMargin: "必要証拠金",
+    marginLevel: "維持率",
+    marginCall: (required: string, cash: string) =>
+      `追証が出ています。必要証拠金 ${required} に対して現金が ${cash} です。次の営業日の終値までに、現物を売るか建玉を減らして解消しないと、その翌営業日の始値で信用・先物がすべて強制決済されます。新規建てはできません。`,
+    forceClose: "証拠金が足りないため、次の営業日の始値で信用・先物の建玉をすべて強制決済します。",
+    leveraged: "信用・先物の建玉",
     markets: "銘柄",
     search: "銘柄名・コードで検索",
     all: "すべて",
     holdingsOnly: "保有のみ",
+    futures: "先物",
     closed: "休場",
     positions: "保有",
     orders: "注文中",
@@ -69,6 +79,8 @@ export const ja = {
     noHistory: "まだ取引はありません",
     cancel: "取消",
     chartHint: "価格は開始日の終値を100とした指数（円換算）です",
+    chartHintFuture:
+      "価格は開始日の終値を100とした指数です。外貨建ての先物は現地通貨の値動きを表し、損益だけをその日の為替で円に換算します",
     finishedBanner: "このシナリオは終了しました",
     toResult: "結果を見る",
     selectInstrument: "左の一覧から銘柄を選んでください",
@@ -77,6 +89,10 @@ export const ja = {
       instrument: "銘柄",
       qty: "口数",
       avgCost: "平均取得",
+      account: "区分",
+      entry: "建値",
+      notional: "建玉金額",
+      margin: "証拠金",
       price: "現在値",
       value: "評価額",
       pnl: "損益",
@@ -104,10 +120,27 @@ export const ja = {
     byAmount: "金額",
     limitPrice: "指値（指数）",
     submit: (side: "buy" | "sell") => (side === "buy" ? "買い注文を出す" : "売り注文を出す"),
+    accounts: { cash: "現物", margin: "信用", future: "先物" } as Record<string, string>,
+    openLong: "新規買い",
+    openShort: "新規売り",
+    close: "返済",
+    notional: "建玉の金額（円）",
+    submitLeveraged: (mode: "openLong" | "openShort" | "close") =>
+      mode === "openLong" ? "新規買いの注文を出す" : mode === "openShort" ? "新規売りの注文を出す" : "返済の注文を出す",
+    closeBy: "返済する量",
+    byPosition: "建玉の割合",
+    leveragedHolding: (side: "long" | "short", v: string) => `${side === "long" ? "買い" : "売り"}建玉 ${v}`,
+    noLeveraged: "この区分の建玉はありません",
+    requiredFor: (rate: string, v: string) => `必要証拠金 ${v}（建玉金額の ${rate}）`,
+    levelAfter: (v: string) => `注文後の維持率 ${v}`,
+    freeCash: (v: string) => `使える現金 ${v}`,
+    marginNote:
+      "信用・先物は毎日の終値で損益を現金に反映します。現金が必要証拠金を下回ると追証になり、解消しないと強制決済されます。",
+    carryNote: (long: string, short: string) => `信用の金利：買い 年${long}・売り（貸株料）年${short}`,
     note: "注文は次の営業日の始値（指値は値幅内に入ったとき）で約定します。",
     closedToday: "この銘柄は今日休場です。注文は次に取引できる日に約定します。",
     costs: (c: number, s: number, f: number) =>
-      `手数料 ${(c * 100).toFixed(2)}%・スプレッド片道 ${(s * 100).toFixed(2)}%${f ? `・為替手数料 ${(f * 100).toFixed(2)}%` : ""}`,
+      `手数料 ${pctText(c)}・スプレッド片道 ${pctText(s)}${f ? `・為替手数料 ${pctText(f)}` : ""}`,
     placed: "注文を受け付けました",
     allCash: "全額",
     all: "全部",
@@ -121,6 +154,7 @@ export const ja = {
     per: "PER",
     pbr: "PBR",
     realPrice: "実際の価格",
+    marginRate: "証拠金率",
   },
   ledger: {
     buy: "買付",
@@ -129,7 +163,22 @@ export const ja = {
     tax: "譲渡益税",
     refund: "税の還付",
     cancel: "取消",
-    cancelReason: { no_cash: "現金不足", no_position: "保有なし" } as Record<string, string>,
+    cancelReason: {
+      no_cash: "現金不足",
+      no_position: "保有なし",
+      margin_call: "追証中",
+      opposite_position: "反対の建玉あり",
+      forced_close: "強制決済",
+    } as Record<string, string>,
+    open: (account: string, side: "buy" | "sell") => `${account}新規${side === "buy" ? "買い" : "売り"}`,
+    close: (account: string, side: "buy" | "sell") => `${account}返済${side === "buy" ? "買い" : "売り"}`,
+    forced: "強制決済",
+    cover: "不足金の穴埋め",
+    interest: "金利・貸株料",
+    dividendAdj: "配当の調整",
+    futuresTax: "先物の税",
+    futuresRefund: "先物の税の還付",
+    marginCall: { call: "追証", emergency: "緊急ロスカット判定", unresolved: "追証の未解消" } as Record<string, string>,
   },
   result: {
     title: "結果",
@@ -173,7 +222,20 @@ export const ja = {
     title: "ルール",
     costsHeading: "取引コスト",
     costCols: { market: "市場", commission: "手数料", spread: "スプレッド（片道）", fx: "為替手数料（片道）" },
-    sections: (v: { initialCash: string; days: number; tax: string; minRanked: number; penalty: number }) => [
+    futuresHeading: "先物の取引コストと証拠金率",
+    futuresCols: { sector: "分類", margin: "証拠金率" },
+    sections: (v: {
+      initialCash: string;
+      days: number;
+      tax: string;
+      minRanked: number;
+      penalty: number;
+      stockMargin: string;
+      cryptoMargin: string;
+      carryLong: string;
+      carryShort: string;
+      emergency: string;
+    }) => [
       {
         heading: "ゲームの流れ",
         items: [
@@ -193,9 +255,30 @@ export const ja = {
         ],
       },
       {
+        heading: "信用取引と先物",
+        items: [
+          "現物の銘柄は「信用」に切り替えると、新規買い・新規売り（空売り）ができます。先物（株価指数・商品・債券・為替）は先物取引で売買します。注文は「新規買い」「新規売り」「返済」から選び、新規は建玉の金額（円）で指定します。",
+          `建玉には証拠金が必要です。証拠金率は信用の株・ETF ${v.stockMargin}、信用の暗号資産 ${v.cryptoMargin}、先物は下の表のとおりです。証拠金は現金だけで払い、現物の株は担保になりません。`,
+          "1つの銘柄・区分で持てるのは、買い建玉か売り建玉のどちらか1つです（両建てはできません）。反対の注文は、先に返済してから出してください。",
+          "信用・先物の損益は、毎日の終値で現金に反映します（値洗い）。外貨建ての先物は、価格を現地通貨の値動きで表示し、損益だけをその日の為替で円に換算します。",
+          `信用取引には、買いは年 ${v.carryLong} の金利、売りは年 ${v.carryShort} の貸株料が、営業日ごとに日割りでかかります。権利落ちの日は、信用買いは配当相当額を受け取り、信用売りは支払います。先物には金利がかかりません。`,
+          "先物は満期のない「つなぎ足」です。乗り換え（ロール）は不要で、ずっと持ち続けられます。",
+        ],
+      },
+      {
+        heading: "追証と強制決済",
+        items: [
+          "終値の時点で、現金が必要証拠金を下回ると「追証」になります。追証の間は、信用・先物の新規建てはできません。",
+          "次の営業日の終値までに、現物を売るか建玉を減らして解消してください。解消しないと、その翌営業日の始値で信用・先物の建玉がすべて強制決済されます。",
+          `現金が必要証拠金の ${v.emergency} を下回るほど損が膨らんだ場合は、猶予なしで次の営業日の始値に強制決済します。`,
+          "強制決済のあとで現金がマイナスなら、現物を売って埋めます。",
+        ],
+      },
+      {
         heading: "税金・配当",
         items: [
           `売却益には ${v.tax} の税金がかかります。シナリオ内の損益は通算され、損失が出れば納めた税金が戻ります（特定口座・源泉徴収ありのイメージ）。`,
+          `「株等（現物・信用）」と「先物」は別々に通算します（どちらも ${v.tax}）。株で得をして先物で損をしても、株の税金は戻りません。信用の金利・貸株料は株等の損失として通算します。`,
           `配当は権利落ち日に、その前日に持っていた口数に応じて現金で受け取ります（${v.tax} を源泉徴収）。`,
           "外貨建ての資産は、その日の為替レートで円に換算されます。為替の動きも損益に含まれます。",
         ],
@@ -204,7 +287,7 @@ export const ja = {
         heading: "スコアとランキング",
         items: [
           "終了時に全保有を最終日の終値で売ったとみなし、含み益への税金とコストを引いた最終資産で評価します。",
-          "同じ期間に「全銘柄を均等に買って放置した場合」（ベンチマーク）と比べ、どれだけ上回ったかがスコア（%ポイント）です。",
+          "同じ期間に「現物の全銘柄を均等に買って放置した場合」（ベンチマーク、先物は含めない）と比べ、どれだけ上回ったかがスコア（%ポイント）です。終了時の信用・先物の建玉は、最終日の終値で返済したとみなします。",
           `ランク戦はデータ（架空・実データ）ごとに同時に1本まで。途中で放棄すると、スコアは「その時点の成績」と「${v.penalty}pt」の低い方になります。`,
           `月間ランキングは、その月に終えたランク戦の平均スコアで決まります（${v.minRanked} 回以上）。`,
         ],
